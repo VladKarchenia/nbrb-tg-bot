@@ -5,6 +5,9 @@ on:
     - cron: '*/15 10-13 * * 1-5'  # Пн–Пт, каждые 15 мин (UTC)
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   run:
     runs-on: ubuntu-latest
