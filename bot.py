@@ -1,26 +1,67 @@
 import requests
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import matplotlib.pyplot as plt
+
+# ================== CONFIG ==================
 
 TOKEN = os.environ['BOT_TOKEN']
 CHAT_ID = os.environ['CHAT_ID']
 
-USD_ID = 431
-EUR_ID = 451
 DATA_FILE = 'rates.json'
 
+CURRENCIES = ('USD', 'EUR')
 
-def is_workday(date):
-    return date.weekday() < 5  # 0–4 = Пн–Пт
+# Официальные нерабочие дни РБ (можно дополнять)
+HOLIDAYS = {
+    '2025-01-01',  # Новый год
+    '2025-01-07',  # Рождество
+    '2025-03-08',  # 8 марта
+    '2025-05-01',  # Праздник труда
+    '2025-05-09',  # День Победы
+    '2025-07-03',  # День Независимости
+    '2025-11-07',  # День Октябрьской революции
+    '2025-12-25',  # Рождество (католическое)
+}
+
+# ================== HELPERS ==================
+
+def is_workday(dt: datetime) -> bool:
+    if dt.weekday() >= 5:  # суббота, воскресенье
+        return False
+    if dt.date().isoformat() in HOLIDAYS:
+        return False
+    return True
 
 
-def get_rate(cur_id):
-    url = f'https://www.nbrb.by/api/exrates/rates/{cur_id}'
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    return r.json()
+def get_rates():
+    """
+    Получаем курсы одним запросом + fallback
+    """
+    urls = [
+        'https://www.nbrb.by/api/exrates/rates?periodicity=0',
+        'https://api.nbrb.by/exrates/rates?periodicity=0',
+    ]
+
+    for url in urls:
+        try:
+            r = requests.get(url, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+
+            result = {}
+            for cur in data:
+                if cur['Cur_Abbreviation'] in CURRENCIES:
+                    result[cur['Cur_Abbreviation']] = cur
+
+            if len(result) == len(CURRENCIES):
+                return result
+
+        except Exception as e:
+            print(f'API failed: {url} → {e}')
+
+    raise RuntimeError('NBRB API unreachable')
 
 
 def load_data():
@@ -52,14 +93,15 @@ def send_photo(path, caption):
         }, files={'photo': f})
 
 
-def build_chart(history, code):
-    dates = list(history.keys())[-30:]
+def build_chart(history: dict, code: str) -> str:
+    dates = sorted(history.keys())[-30:]
     values = [history[d] for d in dates]
 
     plt.figure(figsize=(8, 4))
     plt.plot(dates, values, marker='o')
     plt.title(f'{code} — НБРБ (30 дней)')
     plt.xticks(rotation=45)
+    plt.grid(True)
     plt.tight_layout()
 
     filename = f'{code}.png'
@@ -69,32 +111,43 @@ def build_chart(history, code):
     return filename
 
 
+# ================== MAIN ==================
+
 def main():
     today = datetime.now()
 
+    # ⏰ только рабочие дни
     if not is_workday(today):
+        print('Not a workday, skipping')
+        return
+
+    try:
+        rates = get_rates()
+    except Exception as e:
+        send_message(f'⚠️ Не удалось получить курс НБРБ:\n{e}')
         return
 
     data = load_data()
-
     message = ['💱 Курс НБРБ:']
     charts = []
 
-    for cur_id in (USD_ID, EUR_ID):
-        cur = get_rate(cur_id)
+    for code in CURRENCIES:
+        cur = rates[code]
 
-        code = cur['Cur_Abbreviation']
         rate = cur['Cur_OfficialRate']
-        date = cur['Date'][:10]
+        rate_date = cur['Date'][:10]
 
         history = data.setdefault(code, {})
 
-        yesterday = (datetime.fromisoformat(date) - timedelta(days=1)).date().isoformat()
+        yesterday = (
+            datetime.fromisoformat(rate_date) - timedelta(days=1)
+        ).date().isoformat()
+
         diff = None
         if yesterday in history:
             diff = rate - history[yesterday]
 
-        history[date] = rate
+        history[rate_date] = rate
 
         if diff is None:
             message.append(f'{code}: {rate}')
@@ -105,6 +158,7 @@ def main():
         charts.append(build_chart(history, code))
 
     save_data(data)
+
     send_message('\n'.join(message))
 
     for chart in charts:
