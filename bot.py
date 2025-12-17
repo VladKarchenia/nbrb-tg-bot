@@ -10,71 +10,24 @@ TOKEN = os.environ['BOT_TOKEN']
 CHAT_ID = os.environ['CHAT_ID']
 
 DATA_FILE = 'rates.json'
+META_FILE = 'meta.json'  # хранит последнюю отправленную дату
 
 CURRENCIES = ('USD', 'EUR')
 
-# Официальные нерабочие дни РБ (можно дополнять)
-HOLIDAYS = {
-    '2025-01-01',  # Новый год
-    '2025-01-07',  # Рождество
-    '2025-03-08',  # 8 марта
-    '2025-05-01',  # Праздник труда
-    '2025-05-09',  # День Победы
-    '2025-07-03',  # День Независимости
-    '2025-11-07',  # День Октябрьской революции
-    '2025-12-25',  # Рождество (католическое)
-}
+# ================== STORAGE ==================
 
-# ================== HELPERS ==================
-
-def is_workday(dt: datetime) -> bool:
-    if dt.weekday() >= 5:  # суббота, воскресенье
-        return False
-    if dt.date().isoformat() in HOLIDAYS:
-        return False
-    return True
-
-
-def get_rates():
-    """
-    Получаем курсы одним запросом + fallback
-    """
-    urls = [
-        'https://www.nbrb.by/api/exrates/rates?periodicity=0',
-        'https://api.nbrb.by/exrates/rates?periodicity=0',
-    ]
-
-    for url in urls:
-        try:
-            r = requests.get(url, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-
-            result = {}
-            for cur in data:
-                if cur['Cur_Abbreviation'] in CURRENCIES:
-                    result[cur['Cur_Abbreviation']] = cur
-
-            if len(result) == len(CURRENCIES):
-                return result
-
-        except Exception as e:
-            print(f'API failed: {url} → {e}')
-
-    raise RuntimeError('NBRB API unreachable')
-
-
-def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, 'r', encoding='utf-8') as f:
+def load_json(path, default):
+    if not os.path.exists(path):
+        return default
+    with open(path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
-def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+def save_json(path, data):
+    with open(path, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# ================== TELEGRAM ==================
 
 def send_message(text):
     url = f'https://api.telegram.org/bot{TOKEN}/sendMessage'
@@ -87,13 +40,62 @@ def send_message(text):
 def send_photo(path, caption):
     url = f'https://api.telegram.org/bot{TOKEN}/sendPhoto'
     with open(path, 'rb') as f:
-        requests.post(url, data={
-            'chat_id': CHAT_ID,
-            'caption': caption
-        }, files={'photo': f})
+        requests.post(
+            url,
+            data={'chat_id': CHAT_ID, 'caption': caption},
+            files={'photo': f}
+        )
 
+# ================== NBRB API ==================
 
-def build_chart(history: dict, code: str) -> str:
+def get_rates_with_tomorrow_fallback():
+    """
+    Пытаемся получить курс на завтра.
+    Если его ещё нет — берём курс на сегодня.
+    Возвращаем (rates, rate_date)
+    """
+
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+
+    urls = [
+        'https://www.nbrb.by/api/exrates/rates',
+        'https://api.nbrb.by/exrates/rates',
+    ]
+
+    for target_date in (tomorrow, today):
+        for base_url in urls:
+            try:
+                r = requests.get(
+                    base_url,
+                    params={
+                        'ondate': target_date.isoformat(),
+                        'periodicity': 0
+                    },
+                    timeout=15
+                )
+                r.raise_for_status()
+                data = r.json()
+
+                if not data:
+                    continue
+
+                result = {}
+                for cur in data:
+                    if cur['Cur_Abbreviation'] in CURRENCIES:
+                        result[cur['Cur_Abbreviation']] = cur
+
+                if len(result) == len(CURRENCIES):
+                    return result, target_date
+
+            except Exception as e:
+                print(f'API failed {base_url} ({target_date}): {e}')
+
+    raise RuntimeError('NBRB API unreachable')
+
+# ================== CHART ==================
+
+def build_chart(history, code):
     dates = sorted(history.keys())[-30:]
     values = [history[d] for d in dates]
 
@@ -110,42 +112,41 @@ def build_chart(history: dict, code: str) -> str:
 
     return filename
 
-
 # ================== MAIN ==================
 
 def main():
-    today = datetime.now()
-
-    # ⏰ только рабочие дни
-    if not is_workday(today):
-        print('Not a workday, skipping')
-        return
+    rates_data = load_json(DATA_FILE, {})
+    meta = load_json(META_FILE, {})
 
     try:
-        rates = get_rates()
+        rates, api_date = get_rates_with_tomorrow_fallback()
     except Exception as e:
         send_message(f'⚠️ Не удалось получить курс НБРБ:\n{e}')
         return
 
-    data = load_data()
-    message = ['💱 Курс НБРБ:']
+    rate_date = next(iter(rates.values()))['Date'][:10]
+
+    # ❗ Уже отправляли эту дату — выходим
+    if meta.get('last_sent_date') == rate_date:
+        print(f'Already sent for {rate_date}')
+        return
+
+    message = [f'💱 Курс НБРБ на {rate_date}:']
     charts = []
 
     for code in CURRENCIES:
         cur = rates[code]
-
         rate = cur['Cur_OfficialRate']
-        rate_date = cur['Date'][:10]
 
-        history = data.setdefault(code, {})
+        history = rates_data.setdefault(code, {})
 
-        yesterday = (
+        prev_date = (
             datetime.fromisoformat(rate_date) - timedelta(days=1)
         ).date().isoformat()
 
         diff = None
-        if yesterday in history:
-            diff = rate - history[yesterday]
+        if prev_date in history:
+            diff = rate - history[prev_date]
 
         history[rate_date] = rate
 
@@ -157,13 +158,16 @@ def main():
 
         charts.append(build_chart(history, code))
 
-    save_data(data)
+    # сохраняем историю и мету
+    save_json(DATA_FILE, rates_data)
+    save_json(META_FILE, {'last_sent_date': rate_date})
 
     send_message('\n'.join(message))
 
     for chart in charts:
         send_photo(chart, '📊 Динамика за месяц')
 
+# ================== RUN ==================
 
 if __name__ == '__main__':
     main()
