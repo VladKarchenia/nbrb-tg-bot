@@ -10,17 +10,25 @@ TOKEN = os.environ['BOT_TOKEN']
 CHAT_ID = os.environ['CHAT_ID']
 
 DATA_FILE = 'rates.json'
-META_FILE = 'meta.json'  # хранит последнюю отправленную дату
+META_FILE = 'meta.json'
 
 CURRENCIES = ('USD', 'EUR')
 
-# ================== STORAGE ==================
+API_URLS = [
+    'https://www.nbrb.by/api/exrates/rates',
+    'https://api.nbrb.by/exrates/rates',
+]
+
+# ================== UTILS ==================
 
 def load_json(path, default):
     if not os.path.exists(path):
         return default
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return default
 
 
 def save_json(path, data):
@@ -46,52 +54,38 @@ def send_photo(path, caption):
             files={'photo': f}
         )
 
-# ================== NBRB API ==================
+# ================== NBRB ==================
 
-def get_rates_with_tomorrow_fallback():
-    """
-    Пытаемся получить курс на завтра.
-    Если его ещё нет — берём курс на сегодня.
-    Возвращаем (rates, rate_date)
-    """
+def request_rates(target_date: date):
+    for base_url in API_URLS:
+        try:
+            r = requests.get(
+                base_url,
+                params={
+                    'ondate': target_date.isoformat(),
+                    'periodicity': 0
+                },
+                timeout=15
+            )
+            r.raise_for_status()
+            data = r.json()
 
-    today = date.today()
-    tomorrow = today + timedelta(days=1)
+            if not data:
+                continue
 
-    urls = [
-        'https://www.nbrb.by/api/exrates/rates',
-        'https://api.nbrb.by/exrates/rates',
-    ]
+            result = {
+                cur['Cur_Abbreviation']: cur
+                for cur in data
+                if cur['Cur_Abbreviation'] in CURRENCIES
+            }
 
-    for target_date in (tomorrow, today):
-        for base_url in urls:
-            try:
-                r = requests.get(
-                    base_url,
-                    params={
-                        'ondate': target_date.isoformat(),
-                        'periodicity': 0
-                    },
-                    timeout=15
-                )
-                r.raise_for_status()
-                data = r.json()
+            if len(result) == len(CURRENCIES):
+                return result
 
-                if not data:
-                    continue
+        except Exception as e:
+            print(f'API failed {base_url} ({target_date}): {e}')
 
-                result = {}
-                for cur in data:
-                    if cur['Cur_Abbreviation'] in CURRENCIES:
-                        result[cur['Cur_Abbreviation']] = cur
-
-                if len(result) == len(CURRENCIES):
-                    return result, target_date
-
-            except Exception as e:
-                print(f'API failed {base_url} ({target_date}): {e}')
-
-    raise RuntimeError('NBRB API unreachable')
+    return None
 
 # ================== CHART ==================
 
@@ -118,17 +112,27 @@ def main():
     rates_data = load_json(DATA_FILE, {})
     meta = load_json(META_FILE, {})
 
-    try:
-        rates, api_date = get_rates_with_tomorrow_fallback()
-    except Exception as e:
-        send_message(f'⚠️ Не удалось получить курс НБРБ:\n{e}')
+    last_known_date = meta.get('last_date')
+
+    if last_known_date:
+        target_date = (
+            datetime.fromisoformat(last_known_date).date()
+            + timedelta(days=1)
+        )
+    else:
+        target_date = date.today()
+
+    rates = request_rates(target_date)
+
+    if not rates:
+        print(f'No data for {target_date}, waiting')
         return
 
     rate_date = next(iter(rates.values()))['Date'][:10]
 
-    # ❗ Уже отправляли эту дату — выходим
-    if meta.get('last_sent_date') == rate_date:
-        print(f'Already sent for {rate_date}')
+    # ❗️Если дата не новее — ничего не делаем
+    if last_known_date and rate_date <= last_known_date:
+        print(f'Date {rate_date} already processed')
         return
 
     message = [f'💱 Курс НБРБ на {rate_date}:']
@@ -158,9 +162,11 @@ def main():
 
         charts.append(build_chart(history, code))
 
-    # сохраняем историю и мету
+    rates_data = rates_data
+    meta['last_date'] = rate_date
+
     save_json(DATA_FILE, rates_data)
-    save_json(META_FILE, {'last_sent_date': rate_date})
+    save_json(META_FILE, meta)
 
     send_message('\n'.join(message))
 
