@@ -19,7 +19,6 @@ API_URLS = [
     'https://api.nbrb.by/exrates/rates',
 ]
 
-CHECK_INTERVAL = 15 * 60  # 15 минут
 CHART_DAYS = 30
 
 # ================== STORAGE ==================
@@ -175,13 +174,7 @@ def process_rates():
 # ================== LOOP ==================
 
 def main():
-    while True:
-        try:
-            process_rates()
-        except Exception as e:
-            print(f'Fatal error: {e}')
-
-        time.sleep(CHECK_INTERVAL)
+    process_rates()
 
 # ================== RUN ==================
 
