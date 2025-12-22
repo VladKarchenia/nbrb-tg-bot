@@ -2,7 +2,6 @@ import requests
 import json
 import os
 from datetime import datetime, timedelta, date
-import time
 import matplotlib.pyplot as plt
 
 # ================== CONFIG ==================
@@ -133,34 +132,45 @@ def process_rates():
     while True:
         rates = request_rates(current_date)
 
-        # если данных нет — выходим и ждём следующего цикла
         if not rates:
             print(f'No data for {current_date}, stop')
             break
 
         date_str = current_date.isoformat()
 
-        # проверяем, сохранена ли дата
         already_saved = True
         for code in CURRENCIES:
             if date_str not in rates_data.get(code, {}):
                 already_saved = False
                 break
 
-        # если дата новая — сохраняем, шлём сообщение и графики
         if not already_saved:
             message = [f'💱 Курс НБРБ на {date_str}:']
 
             for code in CURRENCIES:
                 rate = rates[code]['Cur_OfficialRate']
-                rates_data.setdefault(code, {})[date_str] = rate
-                message.append(f'{code}: {rate}')
+                history = rates_data.setdefault(code, {})
+
+                diff_text = ''
+                prev_dates = sorted(history.keys())
+                if prev_dates:
+                    prev_rate = history[prev_dates[-1]]
+                    diff = rate - prev_rate
+
+                    if diff > 0:
+                        diff_text = f' 🟢⬆️ (+{diff:.4f})'
+                    elif diff < 0:
+                        diff_text = f' 🔴⬇️ ({diff:.4f})'
+                    else:
+                        diff_text = ' ⚪️➡️ (0.0000)'
+
+                history[date_str] = rate
+                message.append(f'{code}: {rate}{diff_text}')
 
             save_rates(rates_data)
             send_message('\n'.join(message))
             print(f'Sent new rates for {date_str}')
 
-            # строим и отправляем графики
             for code in CURRENCIES:
                 chart = build_chart(rates_data[code], code)
                 send_photo(chart, f'📊 {code}: последние {CHART_DAYS} дней')
@@ -168,15 +178,13 @@ def process_rates():
         else:
             print(f'Date {date_str} already saved')
 
-        # идём дальше
         current_date += timedelta(days=1)
 
-# ================== LOOP ==================
+# ================== RUN ==================
 
 def main():
     process_rates()
 
-# ================== RUN ==================
 
 if __name__ == '__main__':
     main()
