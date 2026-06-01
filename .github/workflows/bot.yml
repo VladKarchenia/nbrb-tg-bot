@@ -2,8 +2,12 @@ name: NBRB Bot
 
 on:
   schedule:
-    - cron: '*/15 10-13 * * *'  # Пн–Вс, каждые 15 мин (UTC)
+    - cron: '*/15 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: nbrb-bot
+  cancel-in-progress: true
 
 permissions:
   contents: write
